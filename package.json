@@ -4,8 +4,8 @@
   "main": "index.js",
   "type": "commonjs",
   "scripts": {
-    "start": "node index.js"
-  },
+  "start": "node discord-ai-bot/index.js"
+},
   "dependencies": {
     "discord.js": "^14.25.1",
     "dotenv": "^17.3.1",
