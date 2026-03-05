@@ -32,6 +32,8 @@ function saveMemory(memory) {
 
 let memory = loadMemory();
 
+const imageCooldown = new Set();
+
 client.once('ready', () => {
   console.log(`Bot online as ${client.user.tag}`);
 });
@@ -42,7 +44,7 @@ client.on('messageCreate', async (message) => {
 
   const content = message.content;
 
-  // AI Chat
+  // AI CHAT
   if (content.startsWith("!ai")) {
 
     const userId = message.author.id;
@@ -93,7 +95,22 @@ Use these facts when answering.`
   // IMAGE GENERATION
   if (content.startsWith("!image")) {
 
+    const userId = message.author.id;
+
+    if (imageCooldown.has(userId)) {
+      return message.reply("Please wait a few seconds before generating another image.");
+    }
+
     const prompt = content.replace("!image", "").trim();
+
+    if (!prompt) {
+      return message.reply("Please provide an image prompt.");
+    }
+
+    imageCooldown.add(userId);
+    setTimeout(() => imageCooldown.delete(userId), 5000);
+
+    await message.reply("🎨 Generating image...");
 
     try {
 
@@ -107,7 +124,7 @@ Use these facts when answering.`
 
       const imageBuffer = Buffer.from(imageBase64, "base64");
 
-      message.channel.send({
+      await message.channel.send({
         files: [{ attachment: imageBuffer, name: "image.png" }]
       });
 
