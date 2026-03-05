@@ -1,7 +1,7 @@
 {
   "name": "discord-ai-bot",
   "version": "1.0.0",
-  "description": "Discord AI Bot",
+  "description": "Discord AI bot with memory and image generation",
   "main": "index.js",
   "type": "commonjs",
   "scripts": {
