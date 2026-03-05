@@ -1,160 +1,133 @@
-require("dotenv").config();
-const fs = require("fs");
-const { Client, GatewayIntentBits, SlashCommandBuilder, REST, Routes } = require("discord.js");
-const OpenAI = require("openai");
-
-/* ---------------- CONFIG ---------------- */
-
-const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
-const CLIENT_ID = process.env.CLIENT_ID;
-const OPENAI_KEY = process.env.OPENAI_API_KEY;
-
-const MEMORY_FILE = "./memory.json";
-
-/* ---------------- OPENAI ---------------- */
-
-const openai = new OpenAI({
-  apiKey: OPENAI_KEY
-});
-
-/* ---------------- DISCORD ---------------- */
+require('dotenv').config();
+const { Client, GatewayIntentBits } = require('discord.js');
+const OpenAI = require('openai');
+const fs = require('fs');
 
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds]
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent
+  ]
 });
 
-/* ---------------- MEMORY ---------------- */
-
-if (!fs.existsSync(MEMORY_FILE)) {
-  fs.writeFileSync(MEMORY_FILE, "{}");
-}
-
-function getMemory() {
-  return JSON.parse(fs.readFileSync(MEMORY_FILE));
-}
-
-function saveMemory(data) {
-  fs.writeFileSync(MEMORY_FILE, JSON.stringify(data, null, 2));
-}
-
-/* ---------------- SLASH COMMANDS ---------------- */
-
-const commands = [
-  new SlashCommandBuilder()
-    .setName("ask")
-    .setDescription("Ask the AI something")
-    .addStringOption(o =>
-      o.setName("prompt")
-        .setDescription("Your question")
-        .setRequired(true)
-    ),
-
-  new SlashCommandBuilder()
-    .setName("imagine")
-    .setDescription("Generate an AI image")
-    .addStringOption(o =>
-      o.setName("prompt")
-        .setDescription("Image description")
-        .setRequired(true)
-    )
-].map(c => c.toJSON());
-
-const rest = new REST({ version: "10" }).setToken(DISCORD_TOKEN);
-
-async function registerCommands() {
-  await rest.put(
-    Routes.applicationCommands(CLIENT_ID),
-    { body: commands }
-  );
-  console.log("Slash commands registered");
-}
-
-/* ---------------- BOT READY ---------------- */
-
-client.once("ready", () => {
-  console.log(`Logged in as ${client.user.tag}`);
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY
 });
 
-/* ---------------- INTERACTION HANDLER ---------------- */
+// ---------------- MEMORY SYSTEM ----------------
+const MEMORY_FILE = __dirname + "/memory.json";
 
-client.on("interactionCreate", async interaction => {
-
-  if (!interaction.isChatInputCommand()) return;
-
-  const memory = getMemory();
-  const user = interaction.user.id;
-
-  if (!memory[user]) memory[user] = [];
-
+function loadMemory() {
   try {
+    return JSON.parse(fs.readFileSync(MEMORY_FILE));
+  } catch {
+    return {};
+  }
+}
 
-    /* ---------- ASK ---------- */
+function saveMemory(memory) {
+  fs.writeFileSync(MEMORY_FILE, JSON.stringify(memory, null, 2));
+}
 
-    if (interaction.commandName === "ask") {
+let memory = loadMemory();
 
-      await interaction.deferReply();
+// ---------------- BOT READY ----------------
+client.once('ready', () => {
+  console.log(`🤖 Bot online as ${client.user.tag}`);
+});
 
-      const prompt = interaction.options.getString("prompt");
+// ---------------- MESSAGE HANDLER ----------------
+client.on('messageCreate', async (message) => {
+  if (message.author.bot) return;
 
-      memory[user].push({
-        role: "user",
-        content: prompt
-      });
+  const content = message.content;
 
+  // ---------------- AI CHAT ----------------
+  if (content.startsWith("!ai")) {
+    const userId = message.author.id;
+    const prompt = content.replace("!ai", "").trim();
+
+    if (!memory[userId]) memory[userId] = [];
+
+    // Save user facts
+    if (prompt.toLowerCase().startsWith("my name is")) {
+      memory[userId].push(prompt);
+      saveMemory(memory);
+    }
+
+    try {
       const response = await openai.chat.completions.create({
-        model: "gpt-4.1-mini",
-        messages: memory[user]
+        model: "gpt-4o-mini",
+        messages: [
+          {
+            role: "system",
+            content: `You are a helpful AI in a Discord server.
+
+Known facts about the user:
+${memory[userId].join("\n")}
+
+Use these facts when answering.`
+          },
+          {
+            role: "user",
+            content: prompt
+          }
+        ]
       });
 
       const reply = response.choices[0].message.content;
 
-      memory[user].push({
-        role: "assistant",
-        content: reply
-      });
+      if (reply.length > 2000) {
+        await message.reply(reply.substring(0, 1999));
+      } else {
+        await message.reply(reply);
+      }
 
-      saveMemory(memory);
-
-      await interaction.editReply(reply);
+    } catch (error) {
+      console.error("AI ERROR:", error);
+      message.reply("❌ AI error occurred.");
     }
-
-    /* ---------- IMAGE ---------- */
-
-    if (interaction.commandName === "imagine") {
-
-      await interaction.deferReply();
-
-      const prompt = interaction.options.getString("prompt");
-
-      const result = await openai.images.generate({
-        model: "gpt-image-1",
-        prompt: prompt
-      });
-
-      const imageBase64 = result.data[0].b64_json;
-
-      const buffer = Buffer.from(imageBase64, "base64");
-
-      fs.writeFileSync("image.png", buffer);
-
-      await interaction.editReply({
-        content: `Prompt: ${prompt}`,
-        files: ["image.png"]
-      });
-
-    }
-
-  } catch (err) {
-
-    console.error("ERROR:", err);
-
-    await interaction.editReply("Something broke. Check console.");
-
   }
 
+  // ---------------- IMAGE GENERATION ----------------
+  if (content.startsWith("!image")) {
+    const prompt = content.replace("!image", "").trim();
+    if (!prompt) return message.reply("Please provide an image description.");
+
+    try {
+      // Step 1: Send "Generating..." message
+      const waitMsg = await message.reply("🎨 Generating image...");
+
+      // Step 2: Generate image
+      const result = await openai.images.generate({
+        model: "gpt-image-1",
+        prompt: prompt,
+        size: "1024x1024"
+      });
+
+      // Step 3: Validate response
+      if (!result.data || !result.data[0] || !result.data[0].b64_json) {
+        throw new Error("No image returned from OpenAI");
+      }
+
+      // Step 4: Convert Base64 to buffer
+      const imageBuffer = Buffer.from(result.data[0].b64_json, "base64");
+
+      // Step 5: Send image safely
+      await message.channel.send({
+        files: [{ attachment: imageBuffer, name: "image.png" }]
+      });
+
+      // Step 6: Delete the "Generating..." message AFTER sending
+      await waitMsg.delete();
+
+    } catch (error) {
+      console.error("IMAGE ERROR:", error);
+      message.reply("❌ Image generation failed. Try again later.");
+    }
+  }
 });
 
-/* ---------------- START ---------------- */
-
-registerCommands();
-client.login(DISCORD_TOKEN);
+// ---------------- LOGIN ----------------
+client.login(process.env.DISCORD_TOKEN);
