@@ -1,139 +1,160 @@
-require('dotenv').config({ quiet: true });
+require("dotenv").config();
+const fs = require("fs");
+const { Client, GatewayIntentBits, SlashCommandBuilder, REST, Routes } = require("discord.js");
+const OpenAI = require("openai");
 
-const { Client, GatewayIntentBits } = require('discord.js');
-const OpenAI = require('openai');
-const fs = require('fs');
+/* ---------------- CONFIG ---------------- */
 
-const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent
-  ]
-});
-
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY
-});
+const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
+const CLIENT_ID = process.env.CLIENT_ID;
+const OPENAI_KEY = process.env.OPENAI_API_KEY;
 
 const MEMORY_FILE = "./memory.json";
 
-function loadMemory() {
-  try {
-    return JSON.parse(fs.readFileSync(MEMORY_FILE));
-  } catch {
-    return {};
-  }
-}
+/* ---------------- OPENAI ---------------- */
 
-function saveMemory(memory) {
-  fs.writeFileSync(MEMORY_FILE, JSON.stringify(memory, null, 2));
-}
-
-let memory = loadMemory();
-
-const imageCooldown = new Set();
-
-client.once('ready', () => {
-  console.log(`Bot online as ${client.user.tag}`);
+const openai = new OpenAI({
+  apiKey: OPENAI_KEY
 });
 
-client.on('messageCreate', async (message) => {
+/* ---------------- DISCORD ---------------- */
 
-  if (message.author.bot) return;
+const client = new Client({
+  intents: [GatewayIntentBits.Guilds]
+});
 
-  const content = message.content;
+/* ---------------- MEMORY ---------------- */
 
-  // AI CHAT
-  if (content.startsWith("!ai")) {
+if (!fs.existsSync(MEMORY_FILE)) {
+  fs.writeFileSync(MEMORY_FILE, "{}");
+}
 
-    const userId = message.author.id;
-    const prompt = content.replace("!ai", "").trim();
+function getMemory() {
+  return JSON.parse(fs.readFileSync(MEMORY_FILE));
+}
 
-    if (!memory[userId]) memory[userId] = [];
+function saveMemory(data) {
+  fs.writeFileSync(MEMORY_FILE, JSON.stringify(data, null, 2));
+}
 
-    if (prompt.toLowerCase().startsWith("my name is")) {
-      memory[userId].push(prompt);
-      saveMemory(memory);
-    }
+/* ---------------- SLASH COMMANDS ---------------- */
 
-    try {
+const commands = [
+  new SlashCommandBuilder()
+    .setName("ask")
+    .setDescription("Ask the AI something")
+    .addStringOption(o =>
+      o.setName("prompt")
+        .setDescription("Your question")
+        .setRequired(true)
+    ),
+
+  new SlashCommandBuilder()
+    .setName("imagine")
+    .setDescription("Generate an AI image")
+    .addStringOption(o =>
+      o.setName("prompt")
+        .setDescription("Image description")
+        .setRequired(true)
+    )
+].map(c => c.toJSON());
+
+const rest = new REST({ version: "10" }).setToken(DISCORD_TOKEN);
+
+async function registerCommands() {
+  await rest.put(
+    Routes.applicationCommands(CLIENT_ID),
+    { body: commands }
+  );
+  console.log("Slash commands registered");
+}
+
+/* ---------------- BOT READY ---------------- */
+
+client.once("ready", () => {
+  console.log(`Logged in as ${client.user.tag}`);
+});
+
+/* ---------------- INTERACTION HANDLER ---------------- */
+
+client.on("interactionCreate", async interaction => {
+
+  if (!interaction.isChatInputCommand()) return;
+
+  const memory = getMemory();
+  const user = interaction.user.id;
+
+  if (!memory[user]) memory[user] = [];
+
+  try {
+
+    /* ---------- ASK ---------- */
+
+    if (interaction.commandName === "ask") {
+
+      await interaction.deferReply();
+
+      const prompt = interaction.options.getString("prompt");
+
+      memory[user].push({
+        role: "user",
+        content: prompt
+      });
 
       const response = await openai.chat.completions.create({
-        model: "gpt-4o-mini",
-        messages: [
-          {
-            role: "system",
-            content: `You are a helpful AI in a Discord server.
-
-Known facts about the user:
-${memory[userId].join("\n")}
-
-Use these facts when answering.`
-          },
-          {
-            role: "user",
-            content: prompt
-          }
-        ]
+        model: "gpt-4.1-mini",
+        messages: memory[user]
       });
 
       const reply = response.choices[0].message.content;
 
-      if (reply.length > 2000) {
-        message.reply(reply.substring(0, 1999));
-      } else {
-        message.reply(reply);
-      }
+      memory[user].push({
+        role: "assistant",
+        content: reply
+      });
 
-    } catch (error) {
-      console.error(error);
-      message.reply("AI error occurred.");
-    }
-  }
+      saveMemory(memory);
 
-  // IMAGE GENERATION
-  if (content.startsWith("!image")) {
-
-    const userId = message.author.id;
-
-    if (imageCooldown.has(userId)) {
-      return message.reply("Please wait a few seconds before generating another image.");
+      await interaction.editReply(reply);
     }
 
-    const prompt = content.replace("!image", "").trim();
+    /* ---------- IMAGE ---------- */
 
-    if (!prompt) {
-      return message.reply("Please provide an image prompt.");
-    }
+    if (interaction.commandName === "imagine") {
 
-    imageCooldown.add(userId);
-    setTimeout(() => imageCooldown.delete(userId), 5000);
+      await interaction.deferReply();
 
-    await message.reply("🎨 Generating image...");
-
-    try {
+      const prompt = interaction.options.getString("prompt");
 
       const result = await openai.images.generate({
         model: "gpt-image-1",
-        prompt: prompt,
-        size: "1024x1024"
+        prompt: prompt
       });
 
       const imageBase64 = result.data[0].b64_json;
 
-      const imageBuffer = Buffer.from(imageBase64, "base64");
+      const buffer = Buffer.from(imageBase64, "base64");
 
-      await message.channel.send({
-        files: [{ attachment: imageBuffer, name: "image.png" }]
+      fs.writeFileSync("image.png", buffer);
+
+      await interaction.editReply({
+        content: `Prompt: ${prompt}`,
+        files: ["image.png"]
       });
 
-    } catch (error) {
-      console.error(error);
-      message.reply("Image generation failed.");
     }
+
+  } catch (err) {
+
+    console.error("ERROR:", err);
+
+    await interaction.editReply("Something broke. Check console.");
+
   }
 
 });
 
-client.login(process.env.DISCORD_TOKEN);
+/* ---------------- START ---------------- */
+
+registerCommands();
+client.login(DISCORD_TOKEN);
