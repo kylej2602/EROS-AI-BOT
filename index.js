@@ -20,10 +20,27 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY
 });
 
+/* ---------------- VIDEO CONTROLS ---------------- */
+
+const userCooldowns = new Map();
+const VIDEO_COOLDOWN = 5 * 60 * 1000; // 5 minutes
+
+const MAX_QUEUE = 5;
+
+let dailyVideos = 0;
+const MAX_DAILY = 20;
+
+setInterval(() => {
+  dailyVideos = 0;
+  console.log("🔄 Daily video counter reset");
+}, 24 * 60 * 60 * 1000);
+
+/* ---------------- VIDEO QUEUE ---------------- */
+
 let videoQueue = [];
 let processingVideo = false;
 
-/* ---------- VIDEO GENERATION WITH RATE LIMIT RETRY ---------- */
+/* ---------------- RATE LIMIT RETRY ---------------- */
 
 async function createPredictionWithRetry(prompt) {
 
@@ -63,7 +80,7 @@ async function createPredictionWithRetry(prompt) {
 
 }
 
-/* ---------- PROCESS VIDEO QUEUE ---------- */
+/* ---------------- PROCESS VIDEO QUEUE ---------------- */
 
 async function processVideoQueue() {
 
@@ -130,7 +147,7 @@ async function processVideoQueue() {
 
 }
 
-/* ---------- DISCORD READY ---------- */
+/* ---------------- BOT READY ---------------- */
 
 client.once(Events.ClientReady, () => {
 
@@ -138,7 +155,7 @@ client.once(Events.ClientReady, () => {
 
 });
 
-/* ---------- MESSAGE HANDLER ---------- */
+/* ---------------- MESSAGE HANDLER ---------------- */
 
 client.on(Events.MessageCreate, async (message) => {
 
@@ -146,21 +163,45 @@ client.on(Events.MessageCreate, async (message) => {
 
   const content = message.content.trim();
 
-  /* VIDEO COMMAND */
+  /* -------- VIDEO COMMAND -------- */
 
   if (content.startsWith("!video ")) {
 
     const prompt = content.replace("!video ", "").trim();
 
+    if (prompt.length < 20) {
+      return message.reply("⚠️ Please provide a more detailed prompt (at least 20 characters).");
+    }
+
+    if (dailyVideos >= MAX_DAILY) {
+      return message.reply("🚫 Daily video limit reached. Try again tomorrow.");
+    }
+
+    const now = Date.now();
+    const last = userCooldowns.get(message.author.id);
+
+    if (last && now - last < VIDEO_COOLDOWN) {
+      return message.reply("⏳ Please wait 5 minutes before generating another video.");
+    }
+
+    if (videoQueue.length >= MAX_QUEUE) {
+      return message.reply("🚫 Video queue is full. Please try again later.");
+    }
+
+    userCooldowns.set(message.author.id, now);
+    dailyVideos++;
+
     videoQueue.push({ prompt, message });
 
-    await message.reply("⏳ Video request added to queue.");
+    const position = videoQueue.length;
+
+    await message.reply(`⏳ Video added to queue. Position: ${position}`);
 
     processVideoQueue();
 
   }
 
-  /* IMAGE COMMAND */
+  /* -------- IMAGE COMMAND -------- */
 
   else if (content.startsWith("!image ")) {
 
@@ -193,7 +234,7 @@ client.on(Events.MessageCreate, async (message) => {
 
   }
 
-  /* CHAT COMMAND */
+  /* -------- CHAT COMMAND -------- */
 
   else if (content.startsWith("!chat ")) {
 
@@ -222,6 +263,6 @@ client.on(Events.MessageCreate, async (message) => {
 
 });
 
-/* ---------- START BOT ---------- */
+/* ---------------- START BOT ---------------- */
 
 client.login(process.env.DISCORD_TOKEN);
