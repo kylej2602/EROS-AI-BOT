@@ -1,74 +1,107 @@
 // index.js
 require('dotenv').config();
-const { Client, GatewayIntentBits, Partials, AttachmentBuilder } = require('discord.js');
+const { Client, GatewayIntentBits, Events } = require('discord.js');
 const Replicate = require('replicate');
-const fs = require('fs-extra');
-const path = require('path');
-const fetch = require('node-fetch'); // required for downloading video from URL
+const OpenAI = require('openai');
 
-// Initialize Discord client
-const client = new Client({
-    intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
-    partials: [Partials.Channel],
-});
+// Initialize Discord bot
+const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent] });
 
-// Initialize Replicate client with your token
+// Initialize OpenAI and Replicate
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const replicate = new Replicate({ auth: process.env.REPLICATE_API_TOKEN });
 
-// Queue system for video generation
-let isGenerating = false;
+// Simple queue for video generation to avoid rate-limit crashes
+const videoQueue = [];
+let videoProcessing = false;
 
-// Generate video function
-async function generateVideo(prompt) {
-    const tempFile = path.join(__dirname, `video_${Date.now()}.mp4`);
+async function processVideoQueue() {
+    if (videoProcessing || videoQueue.length === 0) return;
+    videoProcessing = true;
 
-    const output = await replicate.run("xai/grok-imagine-video", {
-        input: { prompt, aspect_ratio: "16:9" }
-    });
+    const { prompt, message } = videoQueue.shift();
 
-    if (!output?.url) throw new Error("No video URL returned from Replicate.");
+    try {
+        let attempt = 0;
+        let output;
 
-    // Download the video
-    const response = await fetch(output.url);
-    if (!response.ok) throw new Error(`Failed to fetch video: ${response.statusText}`);
+        while (attempt < 5) { // retry max 5 times
+            try {
+                output = await replicate.run("xai/grok-imagine-video", {
+                    input: { prompt }
+                });
+                break; // success
+            } catch (err) {
+                if (err.status === 429 && err.response?.headers?.get('retry-after')) {
+                    const wait = parseInt(err.response.headers.get('retry-after')) * 1000;
+                    console.log(`Rate limited. Retrying after ${wait}ms`);
+                    await new Promise(res => setTimeout(res, wait));
+                    attempt++;
+                } else {
+                    throw err;
+                }
+            }
+        }
 
-    const buffer = Buffer.from(await response.arrayBuffer());
-    await fs.writeFile(tempFile, buffer);
+        if (!output) throw new Error("Failed video generation after retries.");
 
-    return tempFile;
+        // Send video URL to Discord
+        await message.reply(`🎬 Your video is ready: ${output[0].url}`);
+    } catch (error) {
+        console.error("VIDEO ERROR:", error);
+        await message.reply(`❌ Video generation failed: ${error.message}`);
+    } finally {
+        videoProcessing = false;
+        // Process next in queue
+        if (videoQueue.length > 0) processVideoQueue();
+    }
 }
 
-// Listen to messages
-client.on('messageCreate', async (message) => {
-    if (message.author.bot) return;
-
-    // Command: !video <prompt>
-    if (message.content.startsWith('!video ')) {
-        const prompt = message.content.slice(7).trim();
-        if (!prompt) return message.channel.send("❌ Please provide a prompt.");
-
-        if (isGenerating) return message.channel.send("⏳ A video is already being generated, please wait.");
-
-        isGenerating = true;
-        const statusMessage = await message.channel.send(`⏳ Generating video for: "${prompt}"`);
-
-        try {
-            const videoFile = await generateVideo(prompt);
-            await message.channel.send({ files: [new AttachmentBuilder(videoFile)] });
-            await fs.remove(videoFile); // cleanup temp file
-            await statusMessage.delete();
-        } catch (err) {
-            console.error(err);
-            await statusMessage.edit(`❌ Video generation failed: ${err.message}`);
-        } finally {
-            isGenerating = false;
-        }
-    }
+// Discord ready
+client.once(Events.ClientReady, () => {
+    console.log(`🤖 Bot online as ${client.user.tag}`);
 });
 
-// Bot ready
-client.once('ready', () => {
-    console.log(`🤖 Bot online as ${client.user.tag}`);
+// Message handler
+client.on(Events.MessageCreate, async (message) => {
+    if (message.author.bot) return;
+
+    const content = message.content.trim();
+
+    // Video command
+    if (content.startsWith("!video ")) {
+        const prompt = content.replace("!video ", "").trim();
+        videoQueue.push({ prompt, message });
+        processVideoQueue();
+        return message.reply("⏳ Your video request is queued...");
+    }
+
+    // Image generation command
+    if (content.startsWith("!image ")) {
+        const prompt = content.replace("!image ", "").trim();
+        try {
+            const result = await replicate.run("xai/grok-imagine", { input: { prompt } });
+            return message.reply(`🖼️ Your image is ready: ${result[0].url}`);
+        } catch (error) {
+            console.error("IMAGE ERROR:", error);
+            return message.reply(`❌ Image generation failed: ${error.message}`);
+        }
+    }
+
+    // Chat command
+    if (content.startsWith("!chat ")) {
+        const prompt = content.replace("!chat ", "").trim();
+        try {
+            const response = await openai.chat.completions.create({
+                model: "gpt-4",
+                messages: [{ role: "user", content: prompt }]
+            });
+            return message.reply(response.choices[0].message.content);
+        } catch (error) {
+            console.error("CHAT ERROR:", error);
+            return message.reply(`❌ Chat failed: ${error.message}`);
+        }
+    }
 });
 
 // Login
