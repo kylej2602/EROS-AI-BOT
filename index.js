@@ -1,64 +1,74 @@
 // index.js
 require('dotenv').config();
-const { Client, GatewayIntentBits, AttachmentBuilder } = require('discord.js');
+const { Client, GatewayIntentBits, Partials, AttachmentBuilder } = require('discord.js');
 const Replicate = require('replicate');
-const { writeFile } = require('fs/promises');
+const fs = require('fs');
 const path = require('path');
+const fetch = require('node-fetch');
 
-const client = new Client({
-    intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent]
-});
-
-const replicate = new Replicate({
-    auth: process.env.REPLICATE_API_TOKEN
-});
-
+// Load environment variables
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
+const REPLICATE_API_TOKEN = process.env.REPLICATE_API_TOKEN;
 
-client.once('clientReady', () => {
+if (!DISCORD_TOKEN || !REPLICATE_API_TOKEN) {
+    console.error("❌ Missing required environment variables in .env");
+    process.exit(1);
+}
+
+// Discord client setup
+const client = new Client({
+    intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
+    partials: [Partials.Channel],
+});
+
+client.once('ready', () => {
     console.log(`🤖 Bot online as ${client.user.tag}`);
 });
 
+// Replicate client
+const replicate = new Replicate({ auth: REPLICATE_API_TOKEN });
+
+// Message handler
 client.on('messageCreate', async (message) => {
     if (message.author.bot) return;
 
+    // Video generation command
     if (message.content.startsWith('!video ')) {
         const prompt = message.content.replace('!video ', '').trim();
-        if (!prompt) return message.reply('Please provide a prompt for video generation.');
+        if (!prompt) return message.channel.send("❌ Please provide a prompt for video generation.");
 
-        const replyMsg = await message.reply('⏳ Generating your video, please wait...');
+        message.channel.send(`⏳ Generating video for: "${prompt}" ...`);
 
         try {
-            // Run Grok Imagine Video
-            const output = await replicate.run(
-                'xai/grok-imagine-video', 
-                {
-                    input: {
-                        prompt: prompt,
-                        aspect_ratio: '16:9'
-                    }
-                }
-            );
+            const output = await replicate.run("xai/grok-imagine-video", {
+                input: { prompt, aspect_ratio: "16:9" }
+            });
 
-            // output is the file URL
-            const videoUrl = output[0] || output; // sometimes output is array
-            if (!videoUrl) throw new Error('No video URL returned from Replicate.');
+            // Replicate returns an array or single object
+            const videoUrl = output[0]?.url || output.url;
+            if (!videoUrl) throw new Error("No video URL returned.");
 
-            // Download video
-            const response = await fetch(videoUrl);
-            const buffer = Buffer.from(await response.arrayBuffer());
-            const videoPath = path.join(__dirname, 'video.mp4');
-            await writeFile(videoPath, buffer);
+            const res = await fetch(videoUrl);
+            const buffer = Buffer.from(await res.arrayBuffer());
+            const fileName = `video-${Date.now()}.mp4`;
+            const filePath = path.join('./', fileName);
+            fs.writeFileSync(filePath, buffer);
 
-            // Send video in Discord
-            const attachment = new AttachmentBuilder(videoPath, { name: 'video.mp4' });
-            await message.reply({ content: `🎬 Video for prompt: "${prompt}"`, files: [attachment] });
+            const attachment = new AttachmentBuilder(filePath);
+            await message.channel.send({ files: [attachment] });
 
-            await replyMsg.edit('✅ Video generation complete!');
+            fs.unlinkSync(filePath);
+
         } catch (err) {
-            console.error('VIDEO ERROR:', err);
-            await replyMsg.edit(`❌ Video generation failed: ${err.message}`);
+            console.error("VIDEO ERROR:", err);
+            message.channel.send(`❌ Video generation failed: ${err.message}`);
         }
+    }
+
+    // Example text/image command if you have it
+    if (message.content.startsWith('!say ')) {
+        const text = message.content.replace('!say ', '');
+        message.channel.send(text);
     }
 });
 
